@@ -1,0 +1,121 @@
+# language: YAML | GitHub Actions | runner ubuntu-24.04 | install Android 16 ARM64 toolchain
+name: Lightpanda Android 16 ARM64 remote toolchain
+on:
+  push:
+    branches:
+      - lightpanda-android16-remote-tools
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tools-and-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NDK_VERSION: '30.0.16248370'
+      ANDROID_API: '36'
+      ANDROID_ABI: arm64-v8a
+    steps:
+      - name: Checkout isolated toolchain branch
+        uses: actions/checkout@v4
+
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Zig 0.17.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+
+      - name: Android command-line SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 16 API 36 SDK and Android NDK r30
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools" "ndk;30.0.16248370"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang"
+
+      - name: Rust with Android ARM64 target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android
+
+      - name: Native build utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build cmake pkg-config python3 python3-pip autoconf automake libtool make
+
+      - name: Obtain upstream Lightpanda source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/lightpanda-io/browser.git lightpanda
+          test -f lightpanda/build.zig.zon
+          grep -F '.minimum_zig_version = "0.17.0"' lightpanda/build.zig.zon
+
+      - name: Compile real Android 16 ARM64 Bionic JNI library
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cat > output/lightpanda_android_probe.c <<'PROBE'
+          #include <jni.h>
+          #include <stdint.h>
+          JNIEXPORT jint JNICALL Java_io_lightpanda_probe_NativeProbe_targetApi(JNIEnv *env, jclass clazz) {
+              (void)env; (void)clazz; return 36;
+          }
+          PROBE
+          NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$NDK_BIN/aarch64-linux-android36-clang" -shared -fPIC -O2 -Wall -Wextra -Werror \
+            -o output/liblightpanda_android_probe.so output/lightpanda_android_probe.c
+          "$NDK_BIN/llvm-readelf" -h output/liblightpanda_android_probe.so > output/elf-header.txt
+          "$NDK_BIN/llvm-readelf" -d output/liblightpanda_android_probe.so > output/elf-dynamic.txt
+          grep -q AArch64 output/elf-header.txt
+
+      - name: Record toolchain report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p output
+          {
+            echo "Toolchain manifest — GitHub Actions ubuntu-24.04"
+            echo "Generated (UTC): $(date -u --iso-8601=seconds)"
+            echo "Host: $(uname -a)"
+            echo "API: 36 / Android 16 / ABI: arm64-v8a"
+            echo "NDK: 30.0.16248370"
+            echo "Zig: $(zig version 2>&1 || true)"
+            echo "Java: $(java -version 2>&1 | head -n 1)"
+            echo "Rust: $(rustc --version 2>&1 || true)"
+            echo "Cargo: $(cargo --version 2>&1 || true)"
+            echo "CMake: $(cmake --version 2>&1 | head -n 1)"
+            echo "Ninja: $(ninja --version 2>&1 || true)"
+            echo "NDK clang: $("$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang" --version 2>&1 | head -n 1)"
+            echo "Lightpanda commit: $(git -C lightpanda rev-parse HEAD 2>/dev/null || true)"
+            echo "Android installed packages:"
+            sdkmanager --list_installed 2>&1 || true
+          } > output/toolchain-manifest.txt
+          if test -f output/liblightpanda_android_probe.so; then
+            sha256sum output/liblightpanda_android_probe.so > output/sha256.txt
+          fi
+
+      - name: Publish proof of remote installation and ARM64 build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightpanda-android16-arm64-tools-and-probe
+          path: output/
+          retention-days: 30
