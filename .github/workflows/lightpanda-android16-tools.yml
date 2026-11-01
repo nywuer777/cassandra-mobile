@@ -32,8 +32,15 @@ jobs:
         with:
           version: '0.17.0'
 
-      - name: Android command-line SDK
-        uses: android-actions/setup-android@v3
+      - name: Locate preinstalled Android command-line SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME/cmdline-tools"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          test -n "$SDKMANAGER"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          "$SDKMANAGER" --version
 
       - name: Install Android 16 API 36 SDK and Android NDK r30
         shell: bash
